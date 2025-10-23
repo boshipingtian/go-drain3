@@ -446,6 +446,61 @@ func (d *Drain) GetClusters() []*LogCluster {
 	return d.IdToCluster.Values()
 }
 
+// DeleteCluster 根据ClusterID删除已存在的聚类
+// 参数:
+//   - clusterId: 要删除的聚类ID
+//
+// 返回值:
+//   - bool: 删除是否成功，如果ClusterID不存在则返回false
+//   - error: 删除过程中的错误信息
+func (d *Drain) DeleteCluster(clusterId int64) (bool, error) {
+	// 验证聚类是否存在
+	cluster, exists := d.IdToCluster.Get(clusterId)
+	if !exists {
+		return false, nil
+	}
+
+	// 记录要删除的聚类信息用于清理前缀树
+	tokenCount := len(cluster.LogTemplateTokens)
+
+	// 从LRU缓存中删除聚类
+	d.IdToCluster.Remove(clusterId)
+
+	// 从前缀树中清理该聚类ID的所有引用
+	if err := d.removeClusterFromPrefixTree(d.RootNode, clusterId, tokenCount); err != nil {
+		// 如果前缀树清理失败，尝试恢复缓存中的聚类以保持数据一致性
+		d.IdToCluster.Add(clusterId, cluster)
+		return false, fmt.Errorf("failed to remove cluster from prefix tree: %w", err)
+	}
+
+	return true, nil
+}
+
+// removeClusterFromPrefixTree 从前缀树中递归删除指定的聚类ID
+func (d *Drain) removeClusterFromPrefixTree(node *Node, clusterId int64, tokenCount int) error {
+	if node == nil {
+		return nil
+	}
+
+	// 清理当前节点的聚类ID列表
+	newClusterIds := make([]int64, 0, len(node.ClusterIds))
+	for _, id := range node.ClusterIds {
+		if id != clusterId {
+			newClusterIds = append(newClusterIds, id)
+		}
+	}
+	node.ClusterIds = newClusterIds
+
+	// 递归清理所有子节点
+	for _, childNode := range node.KeyToChildNode {
+		if err := d.removeClusterFromPrefixTree(childNode, clusterId, tokenCount); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (d *Drain) PrintTree(maxClusters int) {
 	d.printNode("root", d.RootNode, 0, maxClusters)
 }
